@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Intelligent Object Detection Dashboard</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <p class="eyebrow">Vision dashboard</p>
+        <h1>Intelligent Object Detection Studio</h1>
+        <p class="subtitle">Inspect scenes in real time, switch camera sources, and control your AI session from one place.</p>
+      </div>
+      <div class="header-actions">
+        <div class="status-pill">
+          <span class="dot offline" id="statusDot"></span>
+          <span id="statusText">Connecting…</span>
+        </div>
+        <button class="secondary-btn" id="downloadReportBtn" type="button" disabled>Download Report</button>
+        <button class="primary-btn" id="sessionToggle" type="button">Stop Session</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="video-panel">
+        <div class="panel-card controls-card">
+          <div class="panel-title-row">
+            <div>
+              <h2>Camera & session controls</h2>
+              <p id="sessionSummary">The detector is currently active and watching the scene.</p>
+            </div>
+            <span class="pill" id="sessionPill">Running</span>
+          </div>
+
+          <label for="ipCameraUrl">IP webcam URL</label>
+          <div class="input-row">
+            <input id="ipCameraUrl" type="text" placeholder="http://192.168.1.100:8080/video">
+            <button id="connectIpCamera" type="button">Connect</button>
+          </div>
+          <p class="helper-text">Use a direct stream address such as <code>/video</code>, <code>/shot.jpg</code>, or <code>/mjpeg</code>.</p>
+          <p class="connection-message info" id="ipCameraMessage">Current source: Backend camera</p>
+          <p class="current-source" id="currentSourceLabel">Current source: Backend camera</p>
+        </div>
+
+        <div class="panel-card video-card">
+          <div class="panel-title-row">
+            <div>
+              <h2>Live feed</h2>
+              <p>AI overlays appear in real time when the session is active.</p>
+            </div>
+            <span class="pill subtle" id="modelBadge">YOLOv8s</span>
+          </div>
+          <div class="video-frame">
+            <img id="videoStream" src="/video_feed" alt="Live camera feed with object detection">
+          </div>
+
+          <div class="stats-bar">
+            <div class="stat">
+              <span class="stat-label">Camera FPS</span>
+              <span class="stat-value" id="cameraFps">--</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Inference FPS</span>
+              <span class="stat-value" id="inferenceFps">--</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Latency</span>
+              <span class="stat-value" id="latency">--</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">Objects</span>
+              <span class="stat-value" id="objectCount">--</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="detections-panel">
+        <div class="panel-card detections-card">
+          <div class="panel-title-row">
+            <h2>Detected Objects</h2>
+            <span class="pill subtle">Live</span>
+          </div>
+          <ul id="detectionsList" class="detections-list">
+            <li class="empty">No objects detected yet.</li>
+          </ul>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
