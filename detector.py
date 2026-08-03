@@ -5,6 +5,7 @@ Runs a YOLOv8 model in its own background thread, completely decoupled from
 camera capture and video streaming so the live preview stays smooth.
 """
 import json
+import os
 import threading
 import time
 from collections import Counter
@@ -12,9 +13,23 @@ from datetime import datetime, timezone
 
 import cv2
 import numpy as np
-from ultralytics import YOLO
+import onnxruntime as ort
 
 import config
+
+COCO_CLASS_NAMES = [
+    "person","bicycle","car","motorcycle","airplane","bus","train","truck",
+    "boat","traffic light","fire hydrant","stop sign","parking meter","bench",
+    "bird","cat","dog","horse","sheep","cow","elephant","bear","zebra",
+    "giraffe","backpack","umbrella","handbag","tie","suitcase","frisbee",
+    "skis","snowboard","sports ball","kite","baseball bat","baseball glove",
+    "skateboard","surfboard","tennis racket","bottle","wine glass","cup","fork",
+    "knife","spoon","bowl","banana","apple","sandwich","orange","broccoli",
+    "carrot","hot dog","pizza","donut","cake","chair","couch","potted plant",
+    "bed","dining table","toilet","tv","laptop","mouse","remote","keyboard",
+    "cell phone","microwave","oven","toaster","sink","refrigerator","book",
+    "clock","vase","scissors","teddy bear","hair drier","toothbrush"
+]
 
 _rng = np.random.default_rng(42)  # fixed seed -> stable per-class colors
 
@@ -59,33 +74,113 @@ class DetectorThread:
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def _resolve_device(self):
-        if config.DEVICE != "auto":
-            return config.DEVICE
-        try:
-            import torch
-            return "cuda" if torch.cuda.is_available() else "cpu"
-        except ImportError:
-            return "cpu"
+        if config.DEVICE.lower() == "cuda":
+            return "cuda"
+        return "cpu"
 
     def _load_model(self):
-        candidates = []
-        if config.MODEL_NAME:
-            candidates.append(config.MODEL_NAME)
-        if config.MODEL_NAME != "yolov8n.pt":
-            candidates.append("yolov8n.pt")
-        if config.MODEL_NAME != "yolov8s.pt":
-            candidates.append("yolov8s.pt")
+        model_path = config.MODEL_NAME
+        if not model_path.lower().endswith(".onnx"):
+            raise RuntimeError(
+                "MODEL_NAME must point to an ONNX model when using the ONNX runtime pipeline."
+            )
+        if not os.path.exists(model_path):
+            raise RuntimeError(f"ONNX model file not found: {model_path}")
 
-        seen = set()
-        for model_name in candidates:
-            if not model_name or model_name in seen:
-                continue
-            seen.add(model_name)
-            try:
-                return YOLO(model_name)
-            except Exception:
-                continue
-        raise RuntimeError("Unable to load a YOLO model. Install ultralytics and ensure the model weights are available.")
+        providers = ["CPUExecutionProvider"]
+        if self.device == "cuda":
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+        try:
+            return ort.InferenceSession(model_path, providers=providers)
+        except Exception as exc:
+            raise RuntimeError(f"Unable to load ONNX model: {exc}")
+
+    def _letterbox(self, image, new_shape=(640, 640), color=(114, 114, 114)):
+        shape = image.shape[:2]  # height, width
+        if isinstance(new_shape, int):
+            new_shape = (new_shape, new_shape)
+
+        r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+        new_unpad = (int(round(shape[1] * r)), int(round(shape[0] * r)))
+        dw = new_shape[1] - new_unpad[0]
+        dh = new_shape[0] - new_unpad[1]
+        dw /= 2
+        dh /= 2
+
+        resized = cv2.resize(image, new_unpad, interpolation=cv2.INTER_LINEAR)
+        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+        padded = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+        return padded, r, (dw, dh)
+
+    def _xywh2xyxy(self, x):
+        y = x.copy()
+        y[:, 0] = x[:, 0] - x[:, 2] / 2
+        y[:, 1] = x[:, 1] - x[:, 3] / 2
+        y[:, 2] = x[:, 0] + x[:, 2] / 2
+        y[:, 3] = x[:, 1] + x[:, 3] / 2
+        return y
+
+    def _scale_coords(self, boxes, ratio, dwdh):
+        boxes[:, [0, 2]] -= dwdh[0]
+        boxes[:, [1, 3]] -= dwdh[1]
+        boxes /= ratio
+        boxes[:, 0::2] = np.clip(boxes[:, 0::2], 0, config.FRAME_WIDTH)
+        boxes[:, 1::2] = np.clip(boxes[:, 1::2], 0, config.FRAME_HEIGHT)
+        return boxes.round().astype(np.int32)
+
+    def _postprocess(self, output):
+        if output is None or len(output.shape) != 3:
+            return []
+
+        output = output[0]
+        if output.size == 0:
+            return []
+
+        boxes = output[:, :4]
+        scores = output[:, 4:5] * output[:, 5:]
+        class_ids = np.argmax(scores, axis=1)
+        confidences = np.max(scores, axis=1)
+
+        mask = confidences >= config.CONFIDENCE_THRESHOLD
+        if not np.any(mask):
+            return []
+
+        boxes = boxes[mask]
+        class_ids = class_ids[mask]
+        confidences = confidences[mask]
+
+        boxes = self._xywh2xyxy(boxes)
+        boxes = self._scale_coords(boxes, self.ratio, self.dwdh)
+
+        xywh = boxes.copy()
+        xywh[:, 2] = xywh[:, 2] - xywh[:, 0]
+        xywh[:, 3] = xywh[:, 3] - xywh[:, 1]
+
+        indices = cv2.dnn.NMSBoxes(
+            xywh.tolist(),
+            confidences.tolist(),
+            float(config.CONFIDENCE_THRESHOLD),
+            float(config.IOU_THRESHOLD),
+        )
+
+        if len(indices) == 0:
+            return []
+
+        indices = np.array(indices).flatten() if isinstance(indices, (list, tuple, np.ndarray)) else np.array([indices]).flatten()
+        detections = []
+        for idx in indices:
+            cls_id = int(class_ids[idx])
+            detections.append(
+                Detection(
+                    cls_id,
+                    COCO_CLASS_NAMES[cls_id] if cls_id < len(COCO_CLASS_NAMES) else f"class_{cls_id}",
+                    float(confidences[idx]),
+                    tuple(boxes[idx].tolist()),
+                )
+            )
+        return detections
 
     def start(self):
         self.running = True
@@ -253,25 +348,16 @@ class DetectorThread:
                 continue
 
             t0 = time.time()
-            results = self.model.predict(
-                frame,
-                conf=config.CONFIDENCE_THRESHOLD,
-                iou=config.IOU_THRESHOLD,
-                device=self.device,
-                verbose=False,
-            )[0]
-            elapsed_ms = (time.time() - t0) * 1000
+            img, self.ratio, self.dwdh = self._letterbox(
+                cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+                new_shape=(config.INPUT_HEIGHT, config.INPUT_WIDTH),
+            )
+            img = img.astype(np.float32) / 255.0
+            img = np.transpose(img, (2, 0, 1))[None]
 
-            detections = []
-            for box in results.boxes:
-                cls_id = int(box.cls[0])
-                conf = float(box.conf[0])
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                if conf < config.CONFIDENCE_THRESHOLD:
-                    continue
-                detections.append(
-                    Detection(cls_id, self.class_names[cls_id], conf, (x1, y1, x2, y2))
-                )
+            outputs = self.model.run(None, {self.model.get_inputs()[0].name: img})
+            detections = self._postprocess(outputs[0])
+            elapsed_ms = (time.time() - t0) * 1000
 
             now = time.time()
             with self.lock:
