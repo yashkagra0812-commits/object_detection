@@ -29,10 +29,10 @@ INPUT_WIDTH = 640
 INPUT_HEIGHT = 640
 
 # ---- Model settings ----
-# The default model now uses YOLOv8 small for a stronger balance of speed
-# and accuracy. You can override it with MODEL_NAME or the environment
-# variable MODEL_NAME if you want a heavier model on a stronger machine.
-MODEL_NAME = os.getenv("MODEL_NAME", "yolov8n.onnx")
+# The default model now uses YOLOv8 nano for speed and compatibility.
+# You can override it with MODEL_NAME or the environment variable MODEL_NAME
+# if you want a heavier model on a stronger machine.
+MODEL_NAME = os.getenv("MODEL_NAME", "yolov8n.pt")
 CONFIDENCE_THRESHOLD = 0.35   # lower threshold helps catch more objects
 IOU_THRESHOLD = 0.45          # non-max suppression overlap threshold
 DEVICE = "auto"               # "cpu", "cuda", or "auto" (auto-detects a GPU)

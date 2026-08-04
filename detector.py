@@ -49,10 +49,12 @@ class Detection:
 class DetectorThread:
     def __init__(self, camera_stream):
         self.camera_stream = camera_stream
+        self.model_path = config.MODEL_NAME
         self.device = self._resolve_device()
         self.model = self._load_model()
+        self.model_type = "onnx" if self.model_path.lower().endswith(".onnx") else "ultralytics"
 
-        self.class_names = self.model.names  # {cls_id: label}
+        self.class_names = self._resolve_class_names()
         self.colors = {
             cls_id: tuple(int(c) for c in _rng.integers(60, 255, size=3))
             for cls_id in self.class_names
@@ -79,22 +81,40 @@ class DetectorThread:
         return "cpu"
 
     def _load_model(self):
-        model_path = config.MODEL_NAME
-        if not model_path.lower().endswith(".onnx"):
-            raise RuntimeError(
-                "MODEL_NAME must point to an ONNX model when using the ONNX runtime pipeline."
-            )
-        if not os.path.exists(model_path):
-            raise RuntimeError(f"ONNX model file not found: {model_path}")
+        model_path = self.model_path
+        if model_path.lower().endswith(".onnx"):
+            if not os.path.exists(model_path):
+                raise RuntimeError(f"ONNX model file not found: {model_path}")
 
-        providers = ["CPUExecutionProvider"]
-        if self.device == "cuda":
-            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            providers = ["CPUExecutionProvider"]
+            if self.device == "cuda":
+                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+            try:
+                return ort.InferenceSession(model_path, providers=providers)
+            except Exception as exc:
+                raise RuntimeError(f"Unable to load ONNX model: {exc}")
 
         try:
-            return ort.InferenceSession(model_path, providers=providers)
+            from ultralytics import YOLO
+        except ImportError as exc:
+            raise RuntimeError(
+                "Unable to load the Ultralytics YOLO model. Install 'ultralytics' "
+                "and 'torch' via pip."
+            )
+
+        if not os.path.exists(model_path):
+            raise RuntimeError(f"YOLO model file not found: {model_path}")
+
+        try:
+            return YOLO(model_path)
         except Exception as exc:
-            raise RuntimeError(f"Unable to load ONNX model: {exc}")
+            raise RuntimeError(f"Unable to load YOLO model: {exc}")
+
+    def _resolve_class_names(self):
+        if self.model_type == "onnx":
+            return {idx: name for idx, name in enumerate(COCO_CLASS_NAMES)}
+        return getattr(self.model, "names", {idx: name for idx, name in enumerate(COCO_CLASS_NAMES)})
 
     def _letterbox(self, image, new_shape=(640, 640), color=(114, 114, 114)):
         shape = image.shape[:2]  # height, width
@@ -355,8 +375,12 @@ class DetectorThread:
             img = img.astype(np.float32) / 255.0
             img = np.transpose(img, (2, 0, 1))[None]
 
-            outputs = self.model.run(None, {self.model.get_inputs()[0].name: img})
-            detections = self._postprocess(outputs[0])
+            if self.model_type == "onnx":
+                outputs = self.model.run(None, {self.model.get_inputs()[0].name: img})
+                detections = self._postprocess(outputs[0])
+            else:
+                results = self.model.predict(source=img, device=self.device, verbose=False)
+                detections = self._parse_ultralytics_results(results)
             elapsed_ms = (time.time() - t0) * 1000
 
             now = time.time()
@@ -380,6 +404,36 @@ class DetectorThread:
                             }
                         )
                         self.session_summary[det.label] += 1
+
+    def _parse_ultralytics_results(self, results):
+        if not results or len(results) == 0:
+            return []
+
+        result = results[0]
+        boxes = getattr(result.boxes, "xyxy", None)
+        confidences = getattr(result.boxes, "conf", None)
+        class_ids = getattr(result.boxes, "cls", None)
+
+        if boxes is None or confidences is None or class_ids is None:
+            return []
+
+        boxes = boxes.cpu().numpy() if hasattr(boxes, "cpu") else np.asarray(boxes)
+        confidences = confidences.cpu().numpy() if hasattr(confidences, "cpu") else np.asarray(confidences)
+        class_ids = class_ids.cpu().numpy().astype(int) if hasattr(class_ids, "cpu") else np.asarray(class_ids, dtype=int)
+
+        detections = []
+        for cls_id, confidence, box in zip(class_ids, confidences, boxes):
+            if confidence < config.CONFIDENCE_THRESHOLD:
+                continue
+            detections.append(
+                Detection(
+                    int(cls_id),
+                    self.class_names.get(int(cls_id), f"class_{int(cls_id)}"),
+                    float(confidence),
+                    tuple(int(x) for x in box.tolist()),
+                )
+            )
+        return detections
 
     def get_detections(self):
         """Return (detections_list, inference_fps, last_inference_ms, status_message)."""
