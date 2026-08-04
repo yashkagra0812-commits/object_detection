@@ -80,8 +80,30 @@ class DetectorThread:
             return "cuda"
         return "cpu"
 
+    def _resolve_model_path(self):
+        requested = self.model_path or "yolov8n.pt"
+        if not requested:
+            requested = "yolov8n.pt"
+
+        if os.path.isabs(requested):
+            return requested
+
+        candidates = [requested]
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        candidates.extend([
+            os.path.join(project_root, requested),
+            os.path.join(project_root, "weights", requested),
+            os.path.join(os.getcwd(), requested),
+        ])
+
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+
+        return requested
+
     def _load_model(self):
-        model_path = self.model_path
+        model_path = self._resolve_model_path()
         if model_path.lower().endswith(".onnx"):
             if not os.path.exists(model_path):
                 raise RuntimeError(f"ONNX model file not found: {model_path}")
@@ -101,15 +123,20 @@ class DetectorThread:
             raise RuntimeError(
                 "Unable to load the Ultralytics YOLO model. Install 'ultralytics' "
                 "and 'torch' via pip."
-            )
+            ) from exc
 
         if not os.path.exists(model_path):
-            raise RuntimeError(f"YOLO model file not found: {model_path}")
+            try:
+                return YOLO(model_path)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"YOLO model could not be loaded from {model_path}: {exc}"
+                ) from exc
 
         try:
             return YOLO(model_path)
         except Exception as exc:
-            raise RuntimeError(f"Unable to load YOLO model: {exc}")
+            raise RuntimeError(f"Unable to load YOLO model: {exc}") from exc
 
     def _resolve_class_names(self):
         if self.model_type == "onnx":

@@ -21,8 +21,6 @@ import cv2
 from flask import Flask, Response, jsonify, make_response, render_template, request
 
 import config
-from camera import CameraStream
-from detector import DetectorThread
 
 app = Flask(__name__)
 
@@ -40,6 +38,9 @@ def _initialize_runtime():
         return True
 
     try:
+        from camera import CameraStream
+        from detector import DetectorThread
+
         camera = CameraStream().start()
         time.sleep(0.5)
         detector = DetectorThread(camera).start()
@@ -266,5 +267,7 @@ if __name__ == "__main__":
         # connection concurrently with short-lived /api/* polling requests.
         app.run(host="0.0.0.0", port=5000, threaded=True, debug=False)
     finally:
-        detector.stop()
-        camera.stop()
+        if detector is not None:
+            detector.stop()
+        if camera is not None:
+            camera.stop()
